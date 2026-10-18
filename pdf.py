@@ -1,60 +1,85 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import subprocess
 import os
-import shutil
 from pathlib import Path
+
+# 尝试导入 tkinterdnd2，若不存在则提示
+try:
+    from tkinterdnd2 import TkinterDnD, DND_FILES
+    DND_AVAILABLE = True
+except ImportError:
+    DND_AVAILABLE = False
+    TkinterDnD = None
+    DND_FILES = None
+
+# 尝试导入 pypdf
+try:
+    from pypdf import PdfWriter, PdfReader
+    PYPDF_AVAILABLE = True
+except ImportError:
+    PYPDF_AVAILABLE = False
+    PdfWriter = None
+    PdfReader = None
 
 
 class PDFMergerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("PDF 合并工具 (qpdf)")
-        self.root.geometry("700x550")
-        self.root.minsize(600, 450)
+        self.root.title("PDF 合并工具 (pypdf + 拖拽)")
+        self.root.geometry("720x580")
+        self.root.minsize(620, 480)
 
         self.pdf_files = []  # 存储 (显示名, 完整路径)
 
-        self._check_qpdf()
+        self._check_dependencies()
         self._build_ui()
 
-    def _check_qpdf(self):
-        """检查系统是否安装了 qpdf"""
-        self.qpdf_path = shutil.which("qpdf")
-        if not self.qpdf_path:
-            # 尝试常见 Windows 安装路径
-            possible = [
-                r"C:\Program Files\qpdf\bin\qpdf.exe",
-                r"C:\Program Files (x86)\qpdf\bin\qpdf.exe",
-            ]
-            for p in possible:
-                if os.path.isfile(p):
-                    self.qpdf_path = p
-                    break
+    def _check_dependencies(self):
+        """检查 pypdf 与 tkinterdnd2 是否可用"""
+        self.pypdf_ok = PYPDF_AVAILABLE
+        self.dnd_ok = DND_AVAILABLE
 
     def _build_ui(self):
-        # ===== 顶部：qpdf 状态 =====
+        # ===== 顶部：依赖状态 =====
         status_frame = ttk.Frame(self.root, padding=(10, 8))
         status_frame.pack(fill="x")
 
-        if self.qpdf_path:
+        # pypdf 状态
+        if self.pypdf_ok:
             ttk.Label(
                 status_frame,
-                text=f"✔ 已找到 qpdf: {self.qpdf_path}",
+                text="✔ pypdf 已安装",
+                foreground="green",
+            ).pack(side="left", padx=(0, 15))
+        else:
+            ttk.Label(
+                status_frame,
+                text="✘ 未找到 pypdf，请执行: pip install pypdf",
+                foreground="red",
+            ).pack(side="left", padx=(0, 15))
+
+        # 拖拽支持状态
+        if self.dnd_ok:
+            ttk.Label(
+                status_frame,
+                text="✔ 支持拖拽",
                 foreground="green",
             ).pack(side="left")
         else:
             ttk.Label(
                 status_frame,
-                text="✘ 未找到 qpdf，请先安装 qpdf 并加入 PATH",
-                foreground="red",
+                text="✘ 拖拽不可用（请安装 tkinterdnd2）",
+                foreground="orange",
             ).pack(side="left")
 
         # ===== 中部：文件列表 =====
-        list_frame = ttk.LabelFrame(self.root, text="待合并的 PDF 文件（从上到下依次合并）", padding=8)
+        list_frame = ttk.LabelFrame(
+            self.root,
+            text="待合并的 PDF 文件（从上到下依次合并，可拖拽 PDF 或文件夹到此处）",
+            padding=8,
+        )
         list_frame.pack(fill="both", expand=True, padx=10, pady=5)
 
-        # 列表框 + 滚动条
         inner = ttk.Frame(list_frame)
         inner.pack(fill="both", expand=True)
 
@@ -73,7 +98,15 @@ class PDFMergerApp:
         # 双击从列表移除
         self.listbox.bind("<Double-Button-1>", lambda e: self.remove_selected())
 
-        # ===== 按钮行（操作列表）=====
+        # ===== 拖拽注册 =====
+        if self.dnd_ok:
+            try:
+                self.listbox.drop_target_register(DND_FILES)
+                self.listbox.dnd_bind("<<Drop>>", self._on_drop)
+            except Exception:
+                pass
+
+        # ===== 按钮行 =====
         btn_frame = ttk.Frame(self.root, padding=(10, 0))
         btn_frame.pack(fill="x", pady=4)
 
@@ -85,7 +118,7 @@ class PDFMergerApp:
         ttk.Button(btn_frame, text="移除选中", command=self.remove_selected).pack(side="left", padx=3)
         ttk.Button(btn_frame, text="清空", command=self.clear_list).pack(side="left", padx=3)
 
-        # ===== 底部：输出与合并 =====
+        # ===== 底部：输出设置 =====
         out_frame = ttk.LabelFrame(self.root, text="输出设置", padding=8)
         out_frame.pack(fill="x", padx=10, pady=5)
 
@@ -101,7 +134,7 @@ class PDFMergerApp:
         self.overwrite_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(row2, text="如果输出文件已存在则覆盖", variable=self.overwrite_var).pack(side="left")
 
-        # 合并按钮
+        # ===== 合并按钮 =====
         action_frame = ttk.Frame(self.root, padding=(10, 6))
         action_frame.pack(fill="x")
         self.merge_btn = ttk.Button(action_frame, text="开始合并", command=self.do_merge)
@@ -109,6 +142,43 @@ class PDFMergerApp:
 
         self.status_var = tk.StringVar(value="就绪")
         ttk.Label(action_frame, textvariable=self.status_var).pack(side="left")
+
+    # ---------- 拖拽处理 ----------
+    def _on_drop(self, event):
+        """处理拖拽释放的文件/文件夹"""
+        if not self.dnd_ok:
+            return
+        # event.data 可能是由空格分隔的多个路径，也可能带有花括号包裹
+        raw = event.data
+        # 使用 tkinter 的 splitlist 可以安全解析带空格的路径
+        try:
+            paths = self.root.tk.splitlist(raw)
+        except Exception:
+            paths = raw.split()
+
+        pdf_paths = []
+        for p in paths:
+            p = p.strip()
+            if not p:
+                continue
+            # 去除可能的花括号
+            if p.startswith("{") and p.endswith("}"):
+                p = p[1:-1]
+            if os.path.isdir(p):
+                # 如果是文件夹，收集其中的 PDF 文件
+                try:
+                    for f in sorted(os.listdir(p)):
+                        if f.lower().endswith(".pdf"):
+                            pdf_paths.append(os.path.join(p, f))
+                except Exception:
+                    pass
+            elif os.path.isfile(p) and p.lower().endswith(".pdf"):
+                pdf_paths.append(p)
+
+        if pdf_paths:
+            self._add_paths(pdf_paths)
+        else:
+            self.status_var.set("拖拽的内容中没有找到 PDF 文件")
 
     # ---------- 列表操作 ----------
     def _refresh_listbox(self):
@@ -210,8 +280,8 @@ class PDFMergerApp:
 
     # ---------- 合并 ----------
     def do_merge(self):
-        if not self.qpdf_path:
-            messagebox.showerror("错误", "未找到 qpdf，请安装后重试。")
+        if not self.pypdf_ok:
+            messagebox.showerror("错误", "未安装 pypdf，请执行: pip install pypdf")
             return
         if len(self.pdf_files) < 2:
             messagebox.showwarning("提示", "请至少添加两个 PDF 文件。")
@@ -227,53 +297,63 @@ class PDFMergerApp:
             if not messagebox.askyesno("文件已存在", f"{out}\n已存在，是否覆盖？"):
                 return
 
-        # 构造 qpdf 命令
-        # qpdf --empty --pages file1 file2 ... -- output
-        cmd = [self.qpdf_path, "--empty", "--pages"]
-        for _, path in self.pdf_files:
-            if not os.path.isfile(path):
-                messagebox.showerror("错误", f"文件不存在：\n{path}")
-                return
-            cmd.append(path)
-        cmd.append("--")
-        cmd.append(out)
-
         self.status_var.set("正在合并…")
         self.merge_btn.config(state="disabled")
         self.root.update_idletasks()
 
+        writer = None
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+            writer = PdfWriter()
+            total_pages = 0
+            for idx, (_, path) in enumerate(self.pdf_files):
+                if not os.path.isfile(path):
+                    raise FileNotFoundError(f"文件不存在：\n{path}")
+                reader = PdfReader(path)
+                for page in reader.pages:
+                    writer.add_page(page)
+                total_pages += len(reader.pages)
+                self.status_var.set(
+                    f"正在合并 [{idx + 1}/{len(self.pdf_files)}] {os.path.basename(path)} …"
+                )
+                self.root.update_idletasks()
+
+            with open(out, "wb") as f:
+                writer.write(f)
+
+            self.status_var.set("合并完成")
+            messagebox.showinfo(
+                "成功",
+                f"已生成：\n{out}\n\n共 {len(self.pdf_files)} 个文件，{total_pages} 页",
             )
-            if result.returncode == 0:
-                self.status_var.set("合并完成")
-                messagebox.showinfo("成功", f"已生成：\n{out}")
-            else:
-                err = (result.stderr or result.stdout or "").strip()
-                self.status_var.set("合并失败")
-                messagebox.showerror("qpdf 执行失败", f"返回码：{result.returncode}\n\n{err}")
-        except FileNotFoundError:
-            messagebox.showerror("错误", "无法执行 qpdf，请确认其路径正确。")
         except Exception as e:
-            messagebox.showerror("错误", f"发生异常：\n{e}")
+            self.status_var.set("合并失败")
+            messagebox.showerror("合并失败", f"发生错误：\n{e}")
         finally:
+            if writer is not None:
+                try:
+                    writer.close()
+                except Exception:
+                    pass
             self.merge_btn.config(state="normal")
 
 
 def main():
-    root = tk.Tk()
+    # 如果 tkinterdnd2 可用，则使用其提供的 Tk 类；否则回退到普通 Tk
+    if DND_AVAILABLE:
+        try:
+            root = TkinterDnD.Tk()
+        except Exception:
+            root = tk.Tk()
+    else:
+        root = tk.Tk()
+
     try:
-        # 让界面跟随系统主题（可选）
         style = ttk.Style()
         if "vista" in style.theme_names():
             style.theme_use("vista")
     except Exception:
         pass
+
     PDFMergerApp(root)
     root.mainloop()
 
