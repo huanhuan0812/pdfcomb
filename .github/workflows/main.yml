@@ -1,0 +1,59 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [ main, master ]
+    tags:
+      - 'v*'
+  pull_request:
+  workflow_dispatch:   # 支持在 Actions 页面手动触发
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      # 1. 检出代码
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2. 安装 Python
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: 'x64'
+
+      # 3. 安装 PyInstaller
+      - name: Install PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller
+
+      # 4. 用 PyInstaller 打包单文件 exe
+      #    --onefile    单文件
+      #    --windowed   GUI 程序，不弹黑框
+      #    --name       输出 exe 名称
+      #    --clean      清理临时文件
+      - name: Build EXE
+        run: |
+          pyinstaller --onefile --windowed --clean --name PDFMerger pdf.py
+
+      # 5. 校验产物
+      - name: Verify output
+        run: |
+          if (Test-Path "dist\PDFMerger.exe") {
+            Get-Item "dist\PDFMerger.exe" | Format-List Name, Length
+          } else {
+            Write-Error "未生成 exe"
+            exit 1
+          }
+        shell: pwsh
+
+      # 6. 上传为 Artifact（每次构建都能在 Actions 页面下载）
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PDFMerger-windows-x64
+          path: dist/PDFMerger.exe
+          if-no-files-found: error
